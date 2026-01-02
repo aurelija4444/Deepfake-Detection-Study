@@ -1,0 +1,764 @@
+---
+title: 'Data Analysis for Perception and Action exam paper on Human
+  Detection of Audio Deepfakes by Hannah Cohen and Aurelija Spunde'
+author: "Aurelija Spunde"
+date: "2026-01-05"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Importing data and loading libraries
+
+```{r, message = FALSE, warning=FALSE}
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(dplyr)
+library(emmeans)
+library(psycho)
+library(DHARMa)
+library(psych)
+library(mgcv)
+library(patchwork)
+```
+
+```{r loading_data, message = FALSE, warning = FALSE}
+
+files <- list.files(path = "logfiles" , full.names = TRUE)
+
+data <- purrr::map_dfr(files, readr::read_csv)
+
+head(data)
+
+data <- data %>%
+  mutate(
+    ParticipantID = factor(ParticipantID),
+    EnglishNativity = factor(EnglishNativity),
+    Familiarity = factor(Familiarity),
+    Filename = factor(Filename),
+    ActualAuthenticity = factor(ActualAuthenticity),
+    Difficulty = factor(Difficulty),
+    Condition = factor(Condition),
+    Correct = as.integer(Correct),
+    ResponseTime = as.numeric(ResponseTime),
+    Response = factor(Response),
+    Confidence = as.numeric(Confidence),
+    Naturalness = as.numeric(Naturalness),
+  )
+
+```
+
+# Data Preprocessing
+
+**Data filtering**
+
+```{r filtering}
+
+data <- data %>% filter(ResponseTime >= 0.2, ResponseTime <= 10)
+
+colSums(is.na(data))
+
+```
+
+**Standardizing data**
+
+```{r standardizing}
+
+data$Confidence_z <- scale(data$Confidence)
+
+audio_data <- data %>%
+  distinct(Filename, F0_mean, F0_std, Intensity_mean, Intensity_std,
+           F1, F2, F3, HNR, SpectralCentroid, SpectralBandwidth, ZeroCrossingRate)
+
+acoustics_scaled <- scale(audio_data %>% select(-Filename))
+
+```
+
+# Participants' Demographics
+
+```{r participants, warning=FALSE}
+
+participants_age <-  data %>% 
+  distinct(ParticipantID, .keep_all = TRUE) %>% 
+  summarise(Range = range(Age),
+            Mean = mean(Age),
+            SD = sd(Age))
+
+participants_age
+
+participants_gender <-  data %>%
+  distinct(ParticipantID, .keep_all = TRUE) %>% 
+  count(Gender)
+
+participants_gender
+
+```
+
+# Data Analysis Plan
+
+0.  Overall Accuracy
+
+1.  Signal Detection Theory (SDT)
+
+2.  Behavioral Performance and Subjective Judgments Analyses
+
+    2.1. Response Time by Condition
+
+    2.2. Accuracy
+
+    2.2.1. Accuracy by Condition
+
+    2.2.2. Accuracy by Confidence
+
+    2.3. Naturalness by Condition
+
+    2.4. Confidence by Condition
+
+3.  Analysis of Acoustic Features
+
+    3.1. Principal Component Analysis (PCA)
+
+    3.2 Response by PCs
+
+# 0. Overall Accuracy
+
+```{r accuracy-data, message=FALSE}
+
+# Accuracy per participant for each of the conditions
+
+data_acc_participants <- data %>% 
+  group_by(Condition, ParticipantID) %>%
+  summarise(
+    Accuracy = mean(Correct),
+    sd = sd(Correct) 
+  )
+
+head(data_acc_participants)
+
+# Overall accuracy
+
+data_acc_pop <- data %>% 
+  group_by(Condition) %>%
+  summarise(
+    pop_Accuracy = mean(Correct),
+    sd = sd(Correct)
+  )
+
+data_acc_pop
+
+data_accuracy <- data_acc_participants %>%
+  summarise(
+    n_participants = n(),
+    overall_mean = mean(Accuracy),
+    overall_sd = sd(Accuracy),
+    overall_se = overall_sd / sqrt(n_participants)
+  )
+
+print(paste("Overall mean accuracy is ", round(mean(data_accuracy$overall_mean),3), "(SE = ", round(mean(data_accuracy$overall_se),3),")"))
+
+
+```
+
+# 1. Signal Detection Theory (SDT)
+
+**Defining responses**
+
+```{r}
+
+sdt <- data %>% 
+  mutate(
+    Type = case_when(
+      ActualAuthenticity == "fake" & Response == "fake" ~ "hit", # Hit
+      ActualAuthenticity == "real" & Response == "real" ~ "cr",  # Correct rejection
+      ActualAuthenticity == "fake" & Response == "real" ~ "miss", # Miss 
+      ActualAuthenticity == "real" & Response == "fake" ~ "fa", # False alarm
+    )
+  )
+
+sdt %>% 
+  group_by(ActualAuthenticity) %>%
+  count(ActualAuthenticity, Response, Correct, Type)
+
+```
+
+**Aggregating per participant x difficulty**
+
+```{r}
+ sdt <- sdt %>% 
+  count(ParticipantID, Difficulty, Type) %>%
+  pivot_wider(
+    names_from = Type,
+    values_from = n,
+    values_fill = 0
+  )
+```
+
+**Calculating hit rate and false alarm rate**
+
+```{r}
+
+sdt <- sdt %>% 
+  mutate(
+    hit_rate = (hit + 0.5) / (hit + miss + 1),
+    fa_rate = (fa + 0.5) / (fa + cr + 1),
+    zhit_rate = qnorm(hit_rate),
+    zfa_rate = qnorm(fa_rate),
+    dprime = zhit_rate - zfa_rate,
+    criterion = -0.5 * (zhit_rate + zfa_rate)
+  )
+
+```
+
+**Population level Sensitivity and Criterion**
+
+```{r}
+
+sdt_sum <- sdt %>%
+  group_by(Difficulty) %>%
+  summarise(
+    pop_dprime = mean(dprime),
+    pop_criterion = mean(criterion),
+    pop_hit_rate = mean(hit_rate),
+    pop_fa_rate = mean(fa_rate),
+  )
+
+sdt_sum
+```
+
+Report: Overall participants were more sensitive in detection of fake audio in the easy condition (*d'* = 2.6) compared to hard condition (*d'* = 1.2). Moreover, in the easy condition they showed a more liberal bias towards categorizing an audio as fake (*c* = -.44) compared to the hard condition where they showed almost no bias at all (*c* = -.02). The hit rate is by almost 23 percent points lower in the hard condition (71.68%) than in the easy condition (94.43%). The false alarm rate is by almost 7 percent points higher in the hard condition (29.52%) as compared to the easy condition (22.67%).
+
+**Modeling Sensitivity by Difficulty**
+
+```{r model-dprime}
+m_dprime <- lmer(dprime ~ Difficulty + (1| ParticipantID), data = sdt)
+
+summary(m_dprime)
+
+```
+
+Report: A linear mixed-effects model was fitted to predict detection sensitivity (d') by Difficulty as fixed effect and random intercept for participants. Results showed a significant effect of Difficulty on the sensitivity, with d' dropping by more than 50% in the hard condition (*M* = 1.2, *SE* = 0.14) compared to the the easy condition (*M* = 2.6, *SE* = 0.15), representing a significant decrease (*b* = -1.4, *SE* = 0.15, *t*(21) = -9.46, *p* \< .0001).
+
+**Checking assumptions**
+
+```{r assumptions-check1}
+
+plot(m_dprime)
+
+qqnorm(residuals(m_dprime))
+qqline(residuals(m_dprime))
+
+qqnorm(ranef(m_dprime)$ParticipantID[[1]])
+qqline(ranef(m_dprime)$ParticipantID[[1]])
+
+```
+
+Report: The visual inspection of QQ-plots for residuals and random effects showed no significant deviation from normality.
+
+**Modeling bias by Difficulty**
+
+```{r model-criterion}
+m_criterion <- lmer(criterion ~ Difficulty + (1| ParticipantID), data = sdt)
+
+summary(m_criterion)
+```
+
+Report: A linear mixed-effects model was fitted to predict detection bias (c) by Difficulty as fixed effect and random intercept for participants. It showed that Difficulty has a significant effect on the criterion, with participants showing by 95% less bias in the hard condition (*M* = -0.02, *SE* = 0.07) as compared to the easy condition (*M* = -0.44, *SE* = 0.07), resulting in a shift towards neutrality (*b* = 0.42, *SE* = 0.07, *t*(21) = 6.29, *p* \< .0001).
+
+**Checking assumptions**
+
+```{r asssumptions-check2}
+
+plot(m_criterion)
+
+## Residuals are homogenic and the relationship is linear
+
+qqnorm(residuals(m_criterion))
+qqline(residuals(m_criterion))
+
+## Residuals are approximately normal with symmetric deviations at the tails
+
+qqnorm(ranef(m_criterion)$ParticipantID[[1]])
+qqline(ranef(m_criterion)$ParticipantID[[1]])
+
+## Random effect per participant slightly deviate from normality, but the center is approximately at the line
+
+```
+
+Report: The visual inspection of QQ-plots for residuals and random effects showed no significant deviation from normality.
+
+**Making plots**
+
+```{r sdt-plots, warning=FALSE}
+
+# Plot 1: d' by Difficulty
+
+ggplot(data = sdt) +
+  geom_point(aes(x = Difficulty , y = dprime), colour = "navy", show.legend = FALSE) +
+  geom_line(aes(x = Difficulty , y = dprime, group = ParticipantID), colour = "navy", show.legend = FALSE) +
+  geom_line(data = sdt_sum,aes(x = Difficulty , y = pop_dprime, group = NA), colour = "blue", size = 2, show.legend = FALSE) +
+  ggtitle("Audio deepfake detection sensitivity (d') by Difficulty") +
+  theme_minimal()
+
+# Plot 2: c by Difficulty
+
+ggplot(data = sdt) +
+  geom_point(aes(x = Difficulty , y = criterion), colour = "navy", show.legend = FALSE) +
+  geom_line(aes(x = Difficulty , y = criterion, group = ParticipantID), colour = "navy", show.legend = FALSE) +
+  geom_line(data = sdt_sum,aes(x = Difficulty , y = pop_criterion, group = NA), colour = "blue", size = 2, show.legend = FALSE) +
+  ggtitle("Audio deepfake detection bias (c) by Difficulty") +
+  theme_minimal()
+
+```
+
+# 2. Behavioral Performance and Subjective Judgments Analyses
+
+## 2.1. Response Time by Condition
+
+**Plot: ResponseTime by Condition**
+
+```{r plot1}
+
+
+data %>% 
+  ggplot(aes(x = Condition, y = ResponseTime)) +
+  geom_boxplot(fill = "blue") +
+  labs(y = "Response Time (s)", title = "Response Time by Condition") +
+  theme_minimal()
+
+data %>% 
+  ggplot(aes(x = Condition, y = ResponseTime)) +
+  geom_violin(trim = TRUE, alpha = 0.4, fill = "blue") +
+  geom_boxplot(width = 0.1, color = "black", outlier.shape = NA, alpha = 0.7) +
+    labs(x = "Condition", y = "Response Time (s)",
+       title = "Response Time by Condition") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+**Modeling Response Time by Condition**
+
+```{r response_time_by_condition}
+
+
+m_rt_by_condition <- glmer(ResponseTime ~ Condition + (1|ParticipantID) + (1|Filename), data = data, family = Gamma(link = "log"))
+summary(m_rt_by_condition)
+
+
+m0 <- glmer(ResponseTime ~ (1|ParticipantID) + (1|Filename), data = data, family = Gamma(link = "log"))
+
+anova(m0, m_rt_by_condition)
+
+emmeans(m_rt_by_condition, pairwise ~ Condition, type = "response")
+
+print(paste("Difference between fake_easy and fake_hard:", round((1 - 0.689) * 100, 1),"% (p < .0001)"))
+print(paste("Difference between fake_easy and real_easy:", round((1 - 0.577) * 100, 1),"% (p < .0001)"))
+print(paste("Difference between fake_easy and real_hard:", round((1 -  0.630) * 100, 1),"% (p < .0001)"))
+print(paste("Difference between fake_hard and real_easy:", round((1 - 0.837) * 100, 1),"% (p = .1410)"))
+print(paste("Difference between fake_hard and real_hard:", round((1 - 0.914) * 100, 1),"% (p = .7014)"))
+print(paste("Difference between real_easy and real_hard:", round((1 - 1.092) * 100, 1),"% (p = .7117)"))
+
+```
+
+Report: To analyze the relationship between response times and Condition, a generalized linear mixed model was fit with a gamma distribution and a log link function, accounting for random intercepts for participants and stimuli. A likelihood-ratio test comparing the full model (random-effects and Condition) with a null model (random-effects only) showed that Condition significantly improved model fit (*χ²*(3) = 38.17, *p* \< .0001). A post-hoc pairwise comparison of different conditions showed that response time for "fake_easy" is significantly different from all other conditions (all *p*s \< .0001 ). Specifically, "fake_easy" (*M* = 0.909s) has by 31.1% shorter response time than "fake_hard" (*M* = 1.319s, *Ratio* = 0.689, *SE* = 0.057, *p* \< .0001), 42.3% shorter response time than "real_easy" (*M* = 1.575s, *Ratio* = 0.577, *SE* = 0.048, *p* \< .0001), and 37.0% shorter response time than "real_hard" (*M* = 1.443s, *Ratio* = 0.630, *SE* = 0.0524, *p* \< .0001). All other comparisons were non-significant (all *p*s \> .14). While the non-significant difference between "fake_hard" and both "real" conditions suggests that the "fake_hard" sounded realistic (as was intended), the non-significant difference between "real_hard" and "real_easy" suggests that the stimuli selection process failed to select the right stimuli. Furthermore, although non-significant, response time for "real_easy" (*M* = 1.575s) was actually by 9.2% higher than for "real_hard" (*M* = 1.443s, *Ratio* = 1.092, *SE* = 0.090, *p* = .7117), suggesting that our selection for "real_hard" and "real_easy" might have given opposite results than intended.
+
+**Checking assumptions**
+
+```{r assumptions-check3}
+
+hist(data$ResponseTime)
+
+# Checking for overdispersion
+
+sim_resid <- simulateResiduals(fittedModel = m_rt_by_condition, n = 1000)
+
+plot(sim_resid)
+
+```
+
+Report: Histogram of the raw response times shows that they are leftly skewed with a right tail, suggesting the use of Gamma distribution. Dispersion test for the model showed no overdispersion (*p* = 0.546).
+
+## 2.2. Accuracy
+
+### 2.2.1. Accuracy by Condition
+
+**Plots: Accuracy by Condition**
+
+```{r accuracy-plots}
+
+data %>%
+  group_by(Condition) %>%
+  summarise(accuracy = mean(Correct), se = sd(Correct)/sqrt(n())) %>%
+  ggplot(aes(x = Condition, y = accuracy)) +
+  geom_col(fill = "blue") + geom_errorbar(aes(ymin = accuracy - se, ymax = accuracy + se), width = .2) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(y = "Accuracy", title = "Mean Accuracy by Condition") + 
+  theme_minimal()
+
+
+ggplot(data_acc_participants, aes(x = Condition, y = Accuracy, group = ParticipantID)) +
+  geom_line(alpha = 0.4, color = "navy") + 
+  geom_point(alpha = 0.4) +
+  stat_summary(aes(group = 1), fun = mean, geom = "line", size = 1.5, color = "blue") +
+  scale_y_continuous(labels = scales::percent_format(Accuracy = 1)) +
+  theme_minimal() +
+  labs(title = "Individual Accuracy by Condition",y = "Accuracy", x = "Condition")
+
+```
+
+**Modeling Accuracy by Condition**
+
+```{r model-accuracy-by-condition}
+
+m_accuracy_by_condition <- glmer(Correct ~ Condition + (1|ParticipantID) + (1|Filename), family = binomial, glmerControl(optimizer="bobyqa", optCtrl = list(maxfun = 2e5)), data = data)
+
+summary(m_accuracy_by_condition)
+
+m0_accuracy <- glmer(Correct ~ (1|ParticipantID) + (1|Filename), data = data, family = binomial, glmerControl(optimizer="bobyqa", optCtrl = list(maxfun = 2e5)))
+
+anova(m0_accuracy, m_accuracy_by_condition)
+
+acc_means <- emmeans(m_accuracy_by_condition, "Condition")
+
+pairs(acc_means, adjust = "bonferroni")
+
+print(paste("Probability of being correct for fake_easy:", round(plogis(3.6718) * 100,2), "%"))
+print(paste("Probability of being correct for fake_hard:", round(plogis(1.121) * 100,2), "%"))
+print(paste("Probability of being correct for real_easy:", round(plogis(1.4549)* 100,2), "%"))
+print(paste("Probability of being correct for real_hard:", round(plogis(1.0281) * 100,2), "%"))
+```
+
+Report: A generalized linear mixed-effects model was fit to predict accuracy by condition as fixed effect and random intercepts for participants and stimuli. A likelihood-ratio test comparing the full model (random-effects and Condition) with a null model (random-effects only) showed that Condition significantly improved model fit (*χ²*(3) = 60.88, *p* \< .0001). Then, post-hoc pairwise comparison showed that within the fake stimuli, the probability of being correct was reduced from 98% in the easy condition to 75% in the hard condition (*b* = -2.55, *SE* = 0.36, *z* = -7.02, *p* \< .0001). The difference between fake_easy and real_easy is 17 percent points (81%, *b* = -2.22, *SE* = 0.37, *z* = -6.06, *p* \< .0001), and between fake_easy and real_hard is 24 percent points (74%, *b* = -2.64, *SE* = 0.36, *z* = -7.29, *p* \< .0001). The difference between fake_hard - real_easy (*b* = -0.33, *SE* = 0.26, *z* = -1.28, *p* = 1) and fake_hard - real_hard (*b* = 0.09, *SE* = 0.26, *z* = 0.365, *p* = 1) was small and non-significant. The difference between the difficulty of real stimuli was also not significant with the difference in 7 percent points (*b* = 0.43, *SE* = 0.26, *z* = 1.65, *p* = .59).
+
+**Checking for overdispersion**
+
+```{r asssumptions-check4}
+
+sim_resid <- simulateResiduals(fittedModel = m_accuracy_by_condition, n = 1000)
+
+plot(sim_resid)
+
+```
+
+Report: Dispersion test showed no overdispersion (*p* = 0.968).
+
+### 2.2.2. Accuracy by Confidence
+
+**Plot: Accuracy by Confidence**
+
+```{r plot2, message=FALSE}
+
+data %>%
+  group_by(Confidence, Condition) %>%
+  summarise(accuracy = mean(Correct), se = sd(Correct)/sqrt(n())) %>%
+  ggplot(aes(x = Confidence, y = accuracy)) +
+  geom_col(fill = "blue") + geom_errorbar(aes(ymin = accuracy - se, ymax = accuracy + se), width = .2) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(y = "Accuracy", title = "Accuracy by Confidence") + 
+  theme_minimal() +
+  facet_wrap(~Condition)
+
+
+
+data_acc_conf_participants <- data %>% 
+  group_by(Condition, ParticipantID, Confidence) %>%
+  summarise(Accuracy = mean(Correct), .groups = "drop")
+
+ggplot(data_acc_conf_participants, aes(x = Confidence, y = Accuracy, color = Condition)) +
+  geom_line(aes(group = ParticipantID), alpha = 0.3, show.legend = FALSE) + 
+  stat_summary(fun = mean, geom = "line", size = 1.2, show.legend = FALSE) +
+  stat_summary(fun = mean, geom = "point", size = 2, show.legend = FALSE) +
+  facet_wrap(~Condition) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal() +
+  labs(title = "Individual Accuracy by Confidence")
+
+```
+
+**Modelling Accuracy by Confidence**
+
+```{r model}
+
+m_accuracy_by_confidence <- glmer(Correct ~ Confidence_z * Condition + (1|ParticipantID) + (1|Filename), family = binomial, glmerControl(optimizer="bobyqa", optCtrl = list(maxfun = 2e5)), data = data)
+
+summary(m_accuracy_by_confidence)
+
+```
+
+Report: To see how Confidence and its interaction with Condition predicts Accuracy, a generalized linear mixed-effects model was fit, with random intercepts for participants and stimuli. With "fake_easy" as intercept, the results show a significant main effect of Confidence (*b* = 1.33, *SE* = 0.29, *z* = 4.66, *p* \< .0001), implying that generally higher Confidence resulted in higher probability of being Correct. For all other conditions, the effect of Condition on Accuracy was significantly lower than the baseline (all *p*s \< .0001). Furthermore, only one of the interaction effects was significant, namely, the negative interaction between Confidence and "fake_hard" condition (*b* = -0.72, *SE* = 0.31, *z* = -2.33, *p* = .02), suggesting that while the other conditions did not change the relationship between Confidence and Accuracy, "fake_hard" condition weakened it. Finally, the results also showed that a random intercept for stimuli explains more variance than a random intercept for participants, suggesting that the different acoustic features have an effect on accuracy.
+
+**Checking for overdispersion**
+
+```{r asssumptions-check5, warning=FALSE}
+
+sim_resid <- simulateResiduals(fittedModel = m_accuracy_by_confidence, n = 1000)
+
+plot(sim_resid)
+
+```
+
+Report: Dispersion test showed no overdispersion (*p* = 0.918).
+
+## 2.3. Naturalness by Condition
+
+**Plotting**
+
+```{r plot3}
+
+data %>%
+  ggplot(aes(x = Condition, y = Naturalness)) +
+  geom_boxplot(alpha = 0.7, fill = "blue") + 
+  coord_cartesian(ylim = c(1, 5)) +
+  labs(x = "Condition", y = "Naturalness Rating (1-5)",
+       title = "Perceived Naturalness by Condition") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+data %>% 
+  ggplot(aes(x = Condition, y = Naturalness)) +
+  geom_violin(trim = TRUE, alpha = 0.4, fill = "blue") +
+  geom_boxplot(width = 0.1, color = "black", outlier.shape = NA, alpha = 0.7) +
+    labs(x = "Condition", y = "Naturalness Rating (1-5)",
+       title = "Perceived Naturalness by Condition") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+**Modelling**
+
+```{r model2}
+
+m_naturalness_by_condition <- lmer(Naturalness ~ Condition + (1 | ParticipantID) + (1 | Filename), data = data)
+
+summary(m_naturalness_by_condition)
+
+m0_naturalness <- lmer(Naturalness ~ (1|ParticipantID) + (1|Filename), data = data)
+
+anova(m0_naturalness, m_naturalness_by_condition)
+
+nat_means <- emmeans(m_naturalness_by_condition, "Condition")
+
+pairs(nat_means, adjust = "bonferroni")
+
+```
+
+Report: To analyze whether our construction of Condition can predict the subjective rating of Naturalness, a linear mixed-effects model was fit, with Condition as fixed effect and random intercepts for participants and stimuli. A likelihood-ratio test comparing the full model (random-effects and Condition) with a null model (random-effects only) showed that Condition significantly improved model fit (*χ²*(3) = 169.69, *p* \< .0001). The post-hoc pairwise comparisons showed that, all conditions were significantly different in mean Naturalness scores, except for the "real" conditions. Specifically, the mean Naturalness score for "fake_easy" (*M* = 1.57) was significantly lower compared to all other conditions (all *p*s \< .0001). The highest mean Naturalness score for "real_easy" (*M* = 3.89) was significantly higher than the score for "fake_hard" (*b* = 1.466, *SE* = 0.112, *p* \< .0001), but non-significantly higher than "real_hard" (*b* = 0.254, *SE* = 0.111, *p* = 0.1518), indicating that "fake_hard" still sounded less natural than human voices, while the human voices in themselves did not differ significantly in perceived Naturalness. Notably, even for "real_easy" the mean Naturalness score was only 3.89 out of 5 (where 5 is "very natural"), indicating that even theoretically the most natural sounding stimuli were perceived as somewhat ambiguously natural. This might might be explained by the bias towards "fake" in the "easy" conditions (which was shown earlier in SDT analysis).
+
+**Checking assumptions**
+
+```{r assumptions-check6}
+
+plot(m_naturalness_by_condition)
+
+    ## Residuals are homogenic and the relationship is linear (for ordinal data)
+
+qqnorm(residuals(m_naturalness_by_condition))
+qqline(residuals(m_naturalness_by_condition))
+
+    ## Residuals are approximately normal with symmetric deviations at the tails
+
+qqnorm(ranef(m_naturalness_by_condition)$ParticipantID[[1]])
+qqline(ranef(m_naturalness_by_condition)$ParticipantID[[1]])
+
+    ## Random effect per participant somewhat deviates from normality, but given the robustness of the model, it should still be acceptable
+
+qqnorm(ranef(m_naturalness_by_condition)$Filename[[1]])
+qqline(ranef(m_naturalness_by_condition)$Filename[[1]])
+
+    ## Random effect per filename slightly deviates from normality, but given the robustness of the model, it should still be acceptable
+```
+
+Report: The visual inspection of QQ-plots for residuals and random effects, showed some deviations from normality, which were nevertheless deemed acceptable, given the robustness of the model.
+
+## 2.4. Confidence by Condition
+
+**Plotting**
+
+```{r plot4}
+
+mean(data$Confidence)
+
+data %>%
+  ggplot(aes(x = Condition, y = Confidence)) +
+  geom_boxplot(alpha = 0.7, fill = "blue") + 
+  coord_cartesian(ylim = c(1, 5)) +
+  labs(x = "Condition", y = "Confidence Rating (1-5)",
+       title = "Judgment Confidence by Condition") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+data %>% 
+  ggplot(aes(x = Condition, y = Confidence)) +
+  geom_violin(trim = TRUE, alpha = 0.4, fill = "blue") +
+  geom_boxplot(width = 0.1, color = "black", outlier.shape = NA, alpha = 0.7) +
+    labs(x = "Condition", y = "Confidence Rating (1-5)",
+       title = "Judgment Confidence by Condition") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+```
+
+**Modelling**
+
+```{r model3}
+
+m_confidence_by_condition <- lmer(Confidence ~ Condition + (1 | ParticipantID) + (1 | Filename), data = data)
+
+summary(m_confidence_by_condition)
+
+m0_confidence <- lmer(Confidence ~ (1|ParticipantID) + (1|Filename), data = data)
+
+anova(m0_confidence, m_confidence_by_condition)
+
+conf_means <- emmeans(m_confidence_by_condition, "Condition")
+
+pairs(conf_means, adjust = "bonferroni")
+
+```
+
+Report: To analyse the effect of Condition on the subjective Confidence score, a linear mixed-effect model was fit, with Condition as fixed effect and random intercepts for participants and stimuli.The results of the likelihood-ratio test comparing the full model (random-effects and Condition) with a null model (random-effects only) showed that Condition significantly improved model fit (*χ²*(3) = 103.23, *p* \< .0001). The post-hoc pairwise comparisons showed that the mean confidence score for "fake_easy" (*M* = 4.36) was significantly higher than all other conditions (all *p*s \< .0001). However, other conditions did not significantly differ among each other in their confidence scores (all *p*s \> .13), with "real_hard" having the lowest confidence score (*M* = 3.33) and the overall mean Confidence being 3.66. The results suggest that "fake_easy" was notably easier to classify compared to all other conditions, that sounded more realistic.
+
+Furthermore, the mean confidence score of 3.66 suggests that participants were overall more confident than not in their answers. However, interestingly, there seems to be an interesting inverse relationship between perceived Naturalness and Confidence. Comparing with the analysis of the effect of Condition on Naturalness, "real" voices received higher Naturalness scores, but also lower Confidence scores. It suggests that participants were more Confident with unnatural voices than with natural ones. It might be the case that unnatural voices seem less likely to be human, while there is the possibility of an AI producing natural voices.
+
+**Checking assumptions**
+
+```{r assumptions-check7}
+
+
+plot(m_confidence_by_condition)
+
+    ## Residuals are homogenic and the relationship is linear (for ordinal data)
+
+hist(residuals(m_confidence_by_condition))
+qqnorm(residuals(m_confidence_by_condition))
+qqline(residuals(m_confidence_by_condition))
+
+    ## Residuals are approximately normal with symmetric deviations at the tails
+
+qqnorm(ranef(m_confidence_by_condition)$ParticipantID[[1]])
+qqline(ranef(m_confidence_by_condition)$ParticipantID[[1]])
+
+    ## Random effect per participant somewhat deviates from normality, but given the robustness of the model, it should still be acceptable
+
+qqnorm(ranef(m_confidence_by_condition)$Filename[[1]])
+qqline(ranef(m_confidence_by_condition)$Filename[[1]])
+
+    ## Random effect per filename slightly deviates from normality, but given the robustness of the model, it should still be acceptable
+
+```
+
+Report: The visual inspection of QQ-plots for residuals and random effects, showed some deviations from normality, which were nevertheless deemed acceptable, given the robustness of the model.
+
+# 3. Analysis of Acoustic Features
+
+## 3.1. Principal Component Analysis (PCA)
+
+```{r pca}
+
+eigvals <- eigen(cor(acoustics_scaled))
+
+eigenvalues <- eigvals$values
+
+plot(eigenvalues, type="b", main="Elbow Plot", 
+     xlab="Component Number", ylab="Eigenvalue", col="navy")
+
+  ## The elbow plot shows that the number of components that explain most of the meaningful variance is 4
+
+pca <- principal(acoustics_scaled, nfactors = 4, rotate = "varimax")
+pca$loadings
+
+
+audio_data$PC1 <- pca$scores[,1]
+audio_data$PC2 <- pca$scores[,2]
+audio_data$PC3 <- pca$scores[,3]
+audio_data$PC4 <- pca$scores[,4]
+
+
+data <- data %>%
+  left_join(audio_data %>% select(Filename, PC1, PC2, PC3, PC4), by = "Filename")
+
+```
+
+Report: To reduce the number of acoustic features to the most relevant and to reduce multicollinearity of these features, a Principal Component Analysis (PCA) with Varimax rotation for interpretation was performed on 11 extracted acoustic properties of the 80 audio files. After visually inspecting a scree plot, a number of 4 principal components was chosen, capturing 70.5% of the variance.
+
+Based on the features that had the highest correlation with the components, they were interpreted as:
+
+1)  Brightness (sharpness) (RC1 (18.6% of variance): main corresponding features are SpectralCentroid (cor = .992) and SpectralBandwidth (cor = .987)),
+
+2)  Vocal purity (cleanness) (RC4 (17.8% of variance): F0_mean (cor = .892), HNR (cor = .885)),
+
+3)  Resonance (RC2 (17.7% of variance): F3 (cor = .846), F2 (cor = .824), F1 (cor = .679)),
+
+4)  Loudness stability (RC3 (16.4% of variance): Intensity_mean (cor = .829), Intensity_std (cor = -.830)).
+
+All of the components explain roughly the same amount of variance, with brightness explaining slightly more than others and loudness explaining the least of it.
+
+## 3.2 Response by PCs
+
+**Plotting Response by Acoustic features**
+
+```{r plot5}
+
+plot_pc1 <- ggplot(data, aes(x = PC1, y = as.numeric(Response == "fake"))) +
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"), method.args = list(family = binomial)) +
+  labs(x = "Brightness (PC1)", y = "P(Response = Fake)", title = "P(Fake) by Brightness (PC1)") + 
+  coord_cartesian(ylim = c(0, 1)) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+        axis.title = element_text(size = 9))
+
+plot_pc2 <- ggplot(data, aes(x = PC2, y = as.numeric(Response == "fake"))) +
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"), method.args = list(family = binomial)) + 
+  labs(x = "Resonance (PC2)", y = "P(Response = Fake)", title = "P(Fake) by Resonance (PC2)") +
+  coord_cartesian(ylim = c(0, 1)) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+        axis.title = element_text(size = 9))
+
+plot_pc3 <- ggplot(data, aes(x = PC3, y = as.numeric(Response == "fake"))) +
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"), method.args = list(family = binomial)) + 
+  labs(x = "Loudness Stability (PC3)", y = "P(Response = Fake)", title = "P(Fake) by Loudness Stability (PC3)") +
+  coord_cartesian(ylim = c(0, 1)) + 
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+        axis.title = element_text(size = 9))
+
+plot_pc4 <- ggplot(data, aes(x = PC4, y = as.numeric(Response == "fake"))) +
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"), method.args = list(family = binomial)) + 
+  labs(x = "Vocal Purity (PC4)", y = "P(Response = Fake)", title = "P(Fake) by Vocal Purity (PC4)") +
+  coord_cartesian(ylim = c(0, 1)) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+        axis.title = element_text(size = 9))
+
+(plot_pc1 + plot_pc2) / (plot_pc3 + plot_pc4) +
+  plot_annotation(title = "Probability of responding 'Fake' by Acoustic Features (PCs)",
+                  theme = theme(plot.title = element_text(size = 14, hjust = 0.5)))
+
+```
+
+**Modelling Response by PCs, using generalized additive model (GAM)**
+
+```{r}
+
+data$Response <- relevel(data$Response, ref = "real")
+
+m_response_by_pcs <- gam(Response ~ s(PC1) + s(PC2) + s(PC3) + s(PC4) +s(ParticipantID, bs = "re")  + s(Filename, bs = "re"), family = binomial(link = "logit"), data = data, method = "REML")
+
+summary(m_response_by_pcs)
+
+print(paste("Baseline probability of responding 'fake' (all PCs have average values): ", round(plogis(0.4891) * 100, 1),"%"))
+
+```
+
+Report: To analyze how acoustic features predict the Response of participants, a possibility of non-linear relationship was allowed by fitting a Generalized Additive Model with a logit link function, with 4 principal acoustic components as fixed effects and random intercepts for participants and stimuli. The model explained 43.1% of deviance.
+
+The results showed that baseline probability of responding "fake" was 62%, but it did not significantly differ from chance level (*b* = 0.489, *SE* = 0.261, *z* = 1.87, *p* = 0.0612). 2 out of 4 principal components had a significant effect on Response. Resonance had a positive linear relationship with probability of responding "fake" (PC2; *edf* = 1.000, *χ²* = 10.223, *p* = .0014), while Vocal Purity had a non-linear U-shaped relationship with low and high values resulting in high probability and middle values in a lower probability of responding "fake". (PC4; *edf* = 2.544, *χ²* = 8.641, *p* = .0263). Brightness (PC1) and Loudness Stability (PC3) had a non-significant linear effects on response (both *edf*s = 1, both *p*s \> .11). Moreover, the results show significant variation across participants and stimuli (both *p*s \< .0001).
